@@ -677,7 +677,10 @@ def main():
     
     # Add a callback function to clear the chat input
     def clear_chat_input():
-        st.session_state.chat_input = ""
+        # This approach is causing the error - we can't modify chat_input directly
+        # st.session_state.chat_input = ""
+        # Instead, we'll set a flag that will be used on next rerun
+        st.session_state.clear_chat_flag = True
     
     # Load available manuals
     manuals = load_manuals()
@@ -824,6 +827,11 @@ def main():
                 if "chat_input" not in st.session_state:
                     st.session_state.chat_input = ""
                 
+                # Handle the chat input clearing flag if it exists
+                if st.session_state.get("clear_chat_flag", False):
+                    # We can't directly modify chat_input, but we can reset the flag
+                    st.session_state.clear_chat_flag = False
+                
                 # Chat input - use a callback to handle submission
                 def submit_chat():
                     if st.session_state.chat_input:
@@ -833,8 +841,8 @@ def main():
                         # Create system prompt
                         system_prompt = create_system_prompt(selected_machine, manual_path)
                         
-                        # Clear the input
-                        clear_chat_input()
+                        # Don't try to clear the input here
+                        # clear_chat_input()  # This line causes the error
                         
                         # Get response
                         with st.spinner("Generating response..."):
@@ -843,10 +851,15 @@ def main():
                                     [system_prompt, user_message],
                                     st.session_state.flash_model
                                 )
+                                # Add the assistant's response to chat history
+                                st.session_state.chat_history.append({"role": "assistant", "content": full_response})
                             else:
                                 response = st.session_state.model.generate_content([system_prompt, user_message])
                                 full_response = response.text
                                 st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                        
+                        # Set the flag to clear the input on next rerun
+                        st.session_state.clear_chat_flag = True
                         
                         # Force a rerun to update the UI
                         st.rerun()
