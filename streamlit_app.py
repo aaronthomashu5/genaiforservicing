@@ -5,7 +5,7 @@ import base64
 from PIL import Image
 import io
 import glob
-import google.generativeai as genai
+import google.generativeai as genai # For GenerativeModel
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from streamlit_extras.stylable_container import stylable_container
 import time
@@ -14,6 +14,22 @@ import fitz  # PyMuPDF
 import cv2
 import av
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
+import asyncio
+import threading
+import queue
+import numpy as np
+import pyaudio
+import json
+from google.genai import types as google_genai_types
+from google import genai as live_genai_module # For Gemini Live Client
+
+# Audio constants for Gemini Live
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+SEND_SAMPLE_RATE = 16000
+RECEIVE_SAMPLE_RATE = 24000
+CHUNK_SIZE = 1024
+MODEL = "models/gemini-2.5-flash-preview-native-audio-dialog"
 
 # Set page config
 st.set_page_config(page_title="ESAB Welding Assistant", layout="wide", page_icon="🔧")
@@ -69,11 +85,18 @@ st.markdown("""
     .stProgress > div > div {
         background-color: #FF9800;
     }
+    .salesman-mode {
+        background-color: #2E7D32;
+        padding: 15px;
+        border-radius: 5px;
+        border-left: 5px solid #81C784;
+        color: #f5f5f5;
+        margin-bottom: 20px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize Gemini API (you'll need to replace with your API key)
-# In production, use st.secrets or environment variables
+# Initialize Gemini API
 def init_genai():
     try:
         # You should store your API key in Streamlit secrets or environment variables
@@ -339,6 +362,36 @@ def stream_response(prompt, flash_model):
         st.error(f"Error streaming response: {e}")
         return None
 
+# Create a salesman mode prompt
+def create_salesman_prompt(machine_name, manual_path):
+    """Create a prompt for the salesman mode"""
+    manual_text = extract_pdf_text(manual_path)
+    
+    salesman_prompt = f"""Speak as salesman as natural as possible.
+    You are an expert ESAB welding machine sales representative specializing in the {machine_name} model.
+    You will be interacting with a potential customer who is interested in this welding machine.
+    
+    Here is technical information about the machine from its manual:
+    {manual_text[:50000]}
+    
+    Your job is to:
+    1. Enthusiastically highlight the key features and benefits of the {machine_name}
+    2. Emphasize its unique selling points compared to competitors
+    3. Explain technical specifications in simple terms
+    4. Address any concerns or questions about the machine
+    5. Guide the customer through the purchase decision process
+    6. Suggest accessories or add-ons that would enhance their experience
+    
+    Speak in a professional, friendly, and persuasive manner.
+    Use sales techniques like benefit highlighting, social proof, and mild urgency where appropriate.
+    Never be pushy or make false claims about the product.
+    If you don't know something specific, acknowledge it and offer to connect them with technical support.
+    
+    Remember, your goal is to help the customer understand why this machine is the right choice for their welding needs.
+    """
+    
+    return salesman_prompt
+
 # Video processor class for the webcam stream
 class VideoProcessor(VideoProcessorBase):
     def __init__(self):
@@ -376,6 +429,235 @@ class VideoProcessor(VideoProcessorBase):
         
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+# Gemini Live Audio Processing
+class GeminiLiveAudio:
+    def __init__(self, machine_name, manual_path):
+        self.machine_name = machine_name
+        self.manual_path = manual_path
+        self.running = False
+        self.conversation_history = []
+        
+        # Initialize PyAudio
+        self.pya = pyaudio.PyAudio()
+        
+        # Audio streams
+        self.audio_stream = None
+        self.output_stream = None
+          # Async components
+        self.audio_in_queue = None
+        self.out_queue = None
+        self.text_queue = None  # Queue for text messages
+        self.session = None
+        self.current_loop = None
+        self.tasks = []
+        
+        # Generate the salesman prompt
+        self.system_prompt = create_salesman_prompt(machine_name, manual_path)
+        
+        # Initialize Gemini Live client
+        api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            st.error("Google API key not found for Gemini Live")
+            return # Ensure we don't proceed without an API key
+            
+        self.client = live_genai_module.Client( # Use live_genai_module here
+            http_options={"api_version": "v1beta"},
+            api_key=api_key,
+        )
+        
+        # Configure Gemini Live settings
+        self.config = google_genai_types.LiveConnectConfig(
+            response_modalities=["AUDIO"],
+            media_resolution="MEDIA_RESOLUTION_MEDIUM",
+            speech_config=google_genai_types.SpeechConfig(
+                voice_config=google_genai_types.VoiceConfig(
+                    prebuilt_voice_config=google_genai_types.PrebuiltVoiceConfig(voice_name="Charan")
+                )
+            ),
+            context_window_compression=google_genai_types.ContextWindowCompressionConfig(
+                trigger_tokens=25600,
+                sliding_window=google_genai_types.SlidingWindow(target_tokens=12800),
+            ),
+        )
+    
+    async def listen_audio(self):
+        """Capture audio from microphone and send to Gemini Live"""
+        mic_info = self.pya.get_default_input_device_info()
+        self.audio_stream = await asyncio.to_thread(
+            self.pya.open,
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=SEND_SAMPLE_RATE,
+            input=True,
+            input_device_index=mic_info["index"],
+            frames_per_buffer=CHUNK_SIZE,
+        )
+        
+        while self.running:
+            try:
+                data = await asyncio.to_thread(
+                    self.audio_stream.read, 
+                    CHUNK_SIZE, 
+                    exception_on_overflow=False
+                )
+                await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
+            except Exception as e:
+                st.error(f"Error capturing audio: {e}")
+                break
+    async def send_realtime(self):
+        """Send audio data to Gemini Live"""
+        while self.running:
+            try:
+                msg = await self.out_queue.get()
+                await self.session.send(input=msg)
+            except Exception as e:
+                st.error(f"Error sending audio: {e}")
+                break
+    
+    async def send_text_messages(self):
+        """Send text messages from the text queue to Gemini Live"""
+        while self.running:
+            try:
+                text_msg = await self.text_queue.get()
+                await self.session.send(input=text_msg, end_of_turn=True)
+            except Exception as e:
+                st.error(f"Error sending text: {e}")
+                break
+    
+    async def receive_audio(self):
+        """Receive audio responses from Gemini Live"""
+        while self.running:
+            try:
+                turn = self.session.receive()
+                async for response in turn:
+                    if data := response.data:
+                        self.audio_in_queue.put_nowait(data)
+                        continue
+                    if text := response.text:
+                        # Add text response to conversation history
+                        self.conversation_history.append({
+                            "role": "assistant", 
+                            "content": text
+                        })
+                
+                # Clear audio queue on turn complete for interruptions
+                while not self.audio_in_queue.empty():
+                    self.audio_in_queue.get_nowait()
+                    
+            except Exception as e:
+                st.error(f"Error receiving audio: {e}")
+                break
+    
+    async def play_audio(self):
+        """Play audio responses from Gemini Live"""
+        self.output_stream = await asyncio.to_thread(
+            self.pya.open,
+            format=FORMAT,
+            channels=CHANNELS,
+            rate=RECEIVE_SAMPLE_RATE,
+            output=True,
+        )
+        
+        while self.running:
+            try:
+                bytestream = await self.audio_in_queue.get()
+                await asyncio.to_thread(self.output_stream.write, bytestream)
+            except Exception as e:
+                st.error(f"Error playing audio: {e}")
+                break
+    async def send_initial_prompt(self):
+        """Send the initial system prompt to set up the salesman context"""
+        await self.session.send(input=self.system_prompt, end_of_turn=True)
+        
+    async def run_session(self):
+        """Main async session runner"""
+        try:
+            async with (
+                self.client.aio.live.connect(model=MODEL, config=self.config) as session,
+                asyncio.TaskGroup() as tg,
+            ):
+                self.session = session
+                self.audio_in_queue = asyncio.Queue()
+                self.out_queue = asyncio.Queue(maxsize=5)
+                self.text_queue = asyncio.Queue()  # Initialize text queue
+                
+                # Send initial salesman prompt
+                await self.send_initial_prompt()
+                
+                # Create tasks
+                self.tasks = [
+                    tg.create_task(self.send_realtime()),
+                    tg.create_task(self.send_text_messages()),  # Add text message task
+                    tg.create_task(self.listen_audio()),
+                    tg.create_task(self.receive_audio()),
+                    tg.create_task(self.play_audio())
+                ]
+                
+                # Wait for stop signal
+                while self.running:
+                    await asyncio.sleep(0.1)
+                    
+        except Exception as e:
+            st.error(f"Error in Gemini Live session: {e}")
+        finally:
+            self.cleanup()
+    
+    def start(self):
+        """Start the Gemini Live session"""
+        if not self.running:
+            self.running = True
+            
+            # Run the async session in a separate thread
+            def run_async_session():
+                try:
+                    asyncio.run(self.run_session())
+                except Exception as e:
+                    st.error(f"Error starting async session: {e}")
+            
+            import threading
+            self.session_thread = threading.Thread(target=run_async_session, daemon=True)
+            self.session_thread.start()
+            
+            return True
+        return False
+    
+    def stop(self):
+        """Stop the Gemini Live session"""
+        if self.running:
+            self.running = False
+            self.cleanup()
+            return True
+        return False
+    
+    def cleanup(self):
+        """Clean up audio resources"""
+        if self.audio_stream:
+            self.audio_stream.stop_stream()
+            self.audio_stream.close()
+        if self.output_stream:
+            self.output_stream.stop_stream()
+            self.output_stream.close()
+    
+    async def send_text_input_async(self, text):
+        """Send text input to Gemini Live"""
+        if self.session:
+            await self.session.send(input=text, end_of_turn=True)
+            self.conversation_history.append({"role": "user", "content": text})
+    def send_text_input(self, text):
+        """Send text input (sync wrapper)"""
+        if self.running and self.session and self.text_queue:
+            # Add text to conversation history
+            self.conversation_history.append({"role": "user", "content": text})
+            
+            # Put text message in queue to be sent by async task
+            try:
+                self.text_queue.put_nowait(text)
+                return f"Text message sent: {text}"
+            except Exception as e:
+                return f"Error queuing text message: {e}"
+        else:
+            return "Gemini Live session not active"
+
 # Main app
 def main():
     # Initialize session state for chat history
@@ -390,9 +672,15 @@ def main():
         st.session_state.model = model
         st.session_state.flash_model = flash_model
     
+    if 'gemini_live_audio' not in st.session_state:
+        st.session_state.gemini_live_audio = None
+    
     # Add a callback function to clear the chat input
     def clear_chat_input():
-        st.session_state.chat_input = ""
+        # This approach is causing the error - we can't modify chat_input directly
+        # st.session_state.chat_input = ""
+        # Instead, we'll set a flag that will be used on next rerun
+        st.session_state.clear_chat_flag = True
     
     # Load available manuals
     manuals = load_manuals()
@@ -429,7 +717,8 @@ def main():
                 "Component Image Recognition", 
                 "Fault-to-Spare Recommendation", 
                 "Repair Playbook Generator",
-                "Live Video Stream"  # New tab
+                "Live Video Stream",
+                "Salesman Mode"  # New tab for Gemini's audio streaming
             ])
             
             # 2. AI Chat Assistant Tab
@@ -442,19 +731,87 @@ def main():
                 
                 with col1:
                     if st.button("Error Codes"):
-                        st.session_state.chat_history.append({"role": "user", "content": "What are the common error codes for this machine and what do they mean?"})
+                        new_message = "What are the common error codes for this machine and how do I fix them?"
+                        st.session_state.chat_history.append({"role": "user", "content": new_message})
+                        
+                        # Create system prompt
+                        system_prompt = create_system_prompt(selected_machine, manual_path)
+                        
+                        # Get response
+                        with st.spinner("Generating response..."):
+                            if st.session_state.get('stream_chat', True):
+                                full_response = stream_response(
+                                    [system_prompt, new_message],
+                                    st.session_state.flash_model
+                                )
+                            else:
+                                response = st.session_state.model.generate_content([system_prompt, new_message])
+                                full_response = response.text
+                            
+                            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
                 
                 with col2:
                     if st.button("Parts List"):
-                        st.session_state.chat_history.append({"role": "user", "content": "Show me the main parts list for this machine with part numbers"})
+                        new_message = "What are the main parts of this machine and their part numbers?"
+                        st.session_state.chat_history.append({"role": "user", "content": new_message})
+                        
+                        # Create system prompt
+                        system_prompt = create_system_prompt(selected_machine, manual_path)
+                        
+                        # Get response
+                        with st.spinner("Generating response..."):
+                            if st.session_state.get('stream_chat', True):
+                                full_response = stream_response(
+                                    [system_prompt, new_message],
+                                    st.session_state.flash_model
+                                )
+                            else:
+                                response = st.session_state.model.generate_content([system_prompt, new_message])
+                                full_response = response.text
+                            
+                            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
                 
                 with col3:
                     if st.button("Safety Precautions"):
-                        st.session_state.chat_history.append({"role": "user", "content": "What are the important safety precautions for this machine?"})
+                        new_message = "What safety precautions should I follow when using this machine?"
+                        st.session_state.chat_history.append({"role": "user", "content": new_message})
+                        
+                        # Create system prompt
+                        system_prompt = create_system_prompt(selected_machine, manual_path)
+                        
+                        # Get response
+                        with st.spinner("Generating response..."):
+                            if st.session_state.get('stream_chat', True):
+                                full_response = stream_response(
+                                    [system_prompt, new_message],
+                                    st.session_state.flash_model
+                                )
+                            else:
+                                response = st.session_state.model.generate_content([system_prompt, new_message])
+                                full_response = response.text
+                            
+                            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
                 
                 with col4:
                     if st.button("Maintenance Schedule"):
-                        st.session_state.chat_history.append({"role": "user", "content": "What is the recommended maintenance schedule for this machine?"})
+                        new_message = "What is the recommended maintenance schedule for this machine?"
+                        st.session_state.chat_history.append({"role": "user", "content": new_message})
+                        
+                        # Create system prompt
+                        system_prompt = create_system_prompt(selected_machine, manual_path)
+                        
+                        # Get response
+                        with st.spinner("Generating response..."):
+                            if st.session_state.get('stream_chat', True):
+                                full_response = stream_response(
+                                    [system_prompt, new_message],
+                                    st.session_state.flash_model
+                                )
+                            else:
+                                response = st.session_state.model.generate_content([system_prompt, new_message])
+                                full_response = response.text
+                            
+                            st.session_state.chat_history.append({"role": "assistant", "content": full_response})
                 
                 # Chat interface
                 st.markdown("#### Chat with the AI Assistant")
@@ -462,47 +819,50 @@ def main():
                 # Display chat history
                 for message in st.session_state.chat_history:
                     if message["role"] == "user":
-                        st.markdown(f'<div class="chat-message user-message"><b>You:</b><br>{message["content"]}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="chat-message user-message"><strong>You:</strong> {message["content"]}</div>', unsafe_allow_html=True)
                     else:
-                        st.markdown(f'<div class="chat-message assistant-message"><b>Assistant:</b><br>{message["content"]}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="chat-message assistant-message"><strong>Assistant:</strong> {message["content"]}</div>', unsafe_allow_html=True)
                 
                 # Initialize chat_input value in session state if it doesn't exist
                 if "chat_input" not in st.session_state:
                     st.session_state.chat_input = ""
                 
+                # Handle the chat input clearing flag if it exists
+                if st.session_state.get("clear_chat_flag", False):
+                    # We can't directly modify chat_input, but we can reset the flag
+                    st.session_state.clear_chat_flag = False
+                
                 # Chat input - use a callback to handle submission
                 def submit_chat():
                     if st.session_state.chat_input:
-                        # Store current input in a temporary variable
                         user_message = st.session_state.chat_input
-                        
-                        # Add user message to chat history
                         st.session_state.chat_history.append({"role": "user", "content": user_message})
                         
-                        # Clear the input by setting its value to empty in session state
-                        st.session_state.chat_input = ""
-                        
-                        # Create system prompt based on the selected machine
+                        # Create system prompt
                         system_prompt = create_system_prompt(selected_machine, manual_path)
                         
-                        # Process and generate response
-                        prompt_parts = [
-                            system_prompt,
-                            "\n\nI need information about the ESAB " + selected_machine + ":\n" + user_message
-                        ]
+                        # Don't try to clear the input here
+                        # clear_chat_input()  # This line causes the error
                         
-                        if st.session_state.get("stream_chat", True):
-                            response_text = stream_response(prompt_parts, st.session_state.flash_model)
-                        else:
-                            try:
-                                response = st.session_state.model.generate_content(prompt_parts)
-                                response_text = response.text
-                            except Exception as e:
-                                response_text = f"Error generating response: {e}"
-                                st.error(response_text)
+                        # Get response
+                        with st.spinner("Generating response..."):
+                            if st.session_state.get('stream_chat', True):
+                                full_response = stream_response(
+                                    [system_prompt, user_message],
+                                    st.session_state.flash_model
+                                )
+                                # Add the assistant's response to chat history
+                                st.session_state.chat_history.append({"role": "assistant", "content": full_response})
+                            else:
+                                response = st.session_state.model.generate_content([system_prompt, user_message])
+                                full_response = response.text
+                                st.session_state.chat_history.append({"role": "assistant", "content": full_response})
                         
-                        # Add assistant response to chat history
-                        st.session_state.chat_history.append({"role": "assistant", "content": response_text})
+                        # Set the flag to clear the input on next rerun
+                        st.session_state.clear_chat_flag = True
+                        
+                        # Force a rerun to update the UI
+                        st.rerun()
                 
                 # Text input with on_change callback
                 user_input = st.text_input(
@@ -536,13 +896,16 @@ def main():
                     st.image(image, caption="Uploaded Component", width=400)
                     
                     if st.button("Identify Component"):
-                        with st.spinner("Analyzing image..."):
-                            # Process the image with the model
-                            result = analyze_component_image(image, selected_machine, manual_path, st.session_state.model)
+                        with st.spinner("Analyzing component..."):
+                            analysis_result = analyze_component_image(
+                                image, 
+                                selected_machine, 
+                                manual_path, 
+                                st.session_state.model
+                            )
                             
-                            # Display the result
-                            st.markdown("### Component Analysis Result")
-                            st.markdown(result)
+                            st.markdown("### Component Analysis")
+                            st.markdown(analysis_result)
             
             # 4. Fault-to-Spare Recommendation Tab
             with tabs[2]:
@@ -557,19 +920,17 @@ def main():
                 if uploaded_fault_list is not None:
                     st.success(f"Uploaded: {uploaded_fault_list.name}")
                     
-                    if st.button("Analyze Faults & Recommend Parts"):
-                        with st.spinner("Processing fault list..."):
-                            # Process the fault list
-                            recommendations = process_fault_list(
-                                uploaded_fault_list, 
-                                selected_machine, 
-                                manual_path, 
+                    if st.button("Analyze Faults"):
+                        with st.spinner("Analyzing fault list and recommending spare parts..."):
+                            analysis_result = process_fault_list(
+                                uploaded_fault_list,
+                                selected_machine,
+                                manual_path,
                                 st.session_state.model
                             )
                             
-                            # Display the recommendations
-                            st.markdown("### Spare Parts Recommendations")
-                            st.markdown(recommendations)
+                            st.markdown("### Fault Analysis and Spare Parts Recommendation")
+                            st.markdown(analysis_result)
             
             # 5. Repair Playbook Generator Tab
             with tabs[3]:
@@ -585,15 +946,16 @@ def main():
                 )
                 
                 if st.button("Generate Repair Playbook") and issue_description:
-                    with st.spinner("Generating comprehensive repair guide..."):
-                        # Stream the playbook generation
+                    with st.spinner("Generating repair playbook..."):
+                        playbook = generate_repair_playbook(
+                            issue_description,
+                            selected_machine,
+                            manual_path,
+                            st.session_state.model
+                        )
+                        
                         st.markdown("### Repair Playbook")
-                        
-                        # Generate the repair playbook with streaming
-                        system_prompt = create_system_prompt(selected_machine, manual_path)
-                        prompt = f"{system_prompt}\n\nPlease create a repair playbook for: {issue_description}"
-                        
-                        stream_response(prompt, st.session_state.flash_model)
+                        st.markdown(playbook)
             
             # 6. Live Video Streaming Tab
             with tabs[4]:
@@ -609,130 +971,186 @@ def main():
                 
                 # Option 1: Live Webcam Stream
                 with stream_col1:
-                    st.markdown("### Live Camera Feed")
-                    st.markdown('<div class="stream-options">', unsafe_allow_html=True)
+                    st.markdown("#### Camera Stream")
                     
                     # Configure WebRTC
-                    rtc_configuration = RTCConfiguration(
-                        {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-                    )
+                    rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+                    video_processor = VideoProcessor()
                     
-                    # Create a unique key for the webrtc component
                     webrtc_ctx = webrtc_streamer(
-                        key="esab-welding-live",
-                        video_processor_factory=VideoProcessor,
-                        rtc_configuration=rtc_configuration,
-                        media_stream_constraints={"video": True, "audio": True},
+                        key="video-stream",
+                        video_processor_factory=lambda: video_processor,
+                        rtc_configuration=rtc_config,
+                        media_stream_constraints={"video": True, "audio": False},
                     )
                     
-                    # Add a screenshot button
                     if webrtc_ctx.video_processor:
-                        if st.button("Take Screenshot for Analysis", key="take_screenshot", 
-                                    help="Capture the current frame for AI analysis"):
+                        if st.button("Take Screenshot"):
                             webrtc_ctx.video_processor.toggle_screenshot()
-                            st.session_state.screenshot_taken = True
-                    
-                    # Display and analyze the screenshot if taken
-                    if webrtc_ctx.video_processor and hasattr(st.session_state, 'screenshot_taken') and st.session_state.screenshot_taken:
+                            st.info("Screenshot captured! Check below to analyze it.")
+                            
+                        # Display and analyze screenshot if available
                         screenshot = webrtc_ctx.video_processor.get_screenshot()
                         if screenshot is not None:
-                            # Convert from OpenCV format to PIL Image
-                            screenshot_rgb = cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB)
-                            pil_image = Image.fromarray(screenshot_rgb)
+                            st.image(screenshot, caption="Captured Screenshot", width=400)
                             
-                            st.image(pil_image, caption="Captured Screenshot", width=400)
-                            
-                            # Add a button to analyze the captured image
-                            if st.button("Analyze Captured Component"):
+                            if st.button("Analyze Screenshot"):
+                                # Convert OpenCV image to PIL for analysis
+                                pil_image = Image.fromarray(cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB))
+                                
                                 with st.spinner("Analyzing screenshot..."):
-                                    # Process the image with the model
-                                    result = analyze_component_image(pil_image, selected_machine, manual_path, st.session_state.model)
+                                    analysis_result = analyze_component_image(
+                                        pil_image,
+                                        selected_machine,
+                                        manual_path,
+                                        st.session_state.model
+                                    )
                                     
-                                    # Display the result
-                                    st.markdown("### Component Analysis Result")
-                                    st.markdown(result)
-                    
-                    st.markdown('</div>', unsafe_allow_html=True)
+                                    st.markdown("### Screenshot Analysis")
+                                    st.markdown(analysis_result)
                 
                 # Option 2: Screen Sharing
                 with stream_col2:
-                    st.markdown("### Screen Sharing")
-                    st.markdown('<div class="stream-options">', unsafe_allow_html=True)
-                    
+                    st.markdown("#### Screen Sharing")
                     st.markdown("""
-                    For desktop screen sharing:
-                    
-                    1. Click the "Start Screen Share" button below
-                    2. Select which window or screen to share
-                    3. The technician will see your screen in real-time
+                    For desktop/screen sharing, click the button below to start sharing your screen.
+                    This allows you to show error messages or settings on the machine's display.
                     """)
                     
                     # NOTE: Due to Streamlit's limitations, we're implementing this with a placeholder button
                     # that would normally launch a screen sharing session using a JavaScript library
-                    
-                    if st.button("Start Screen Share", key="start_screen_share"):
-                        st.info("""
-                        Screen sharing initiated! 
+                    if st.button("Share Your Screen"):
+                        st.markdown("""
+                        Screen sharing initiated.
                         
-                        NOTE: In a production application, this would launch a WebRTC or similar screen sharing session.
-                        Due to Streamlit's limitations, full screen sharing requires additional JavaScript components
-                        which would be implemented when deploying this app.
+                        Select which window or screen to share when prompted by your browser.
                         """)
                         
                         # Here you would normally include JavaScript to start screen sharing
+                        # In a production application, you would use a WebRTC library for screen sharing
                         # This is just a placeholder for the actual implementation
-                        
-                    st.markdown("### Upload Screen Recording")
-                    
-                    # Allow users to upload a screen recording as an alternative
-                    screen_recording = st.file_uploader("Upload a video recording of your screen", 
-                                                       type=["mp4", "mov", "avi", "webm"])
-                    
-                    if screen_recording is not None:
-                        # Save the uploaded video to a temporary file
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{screen_recording.name.split(".")[-1]}') as tmp:
-                            tmp.write(screen_recording.getvalue())
-                            temp_path = tmp.name
-                        
-                        # Display the video
-                        st.video(temp_path)
-                        
-                        # Option to analyze a frame from the video
-                        if st.button("Extract Frame for Analysis"):
-                            # Open the video file
-                            cap = cv2.VideoCapture(temp_path)
+                        st.info("Note: Screen sharing simulation only. In a production app, this would launch a WebRTC screen sharing session.")
+            
+            # 7. Salesman Mode Tab (New)
+            with tabs[5]:
+                st.markdown('<div class="feature-header">Salesman Assistant Mode</div>', unsafe_allow_html=True)
+                
+                st.markdown("""
+                <div class="salesman-mode">
+                This mode uses Gemini Live API for real-time audio conversations between potential customers 
+                and an AI-powered sales assistant. The AI can speak naturally about the selected ESAB welding 
+                machine's features, benefits, and technical specifications.
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Instructions
+                st.markdown("""
+                ### How Gemini Live Audio Works:
+                1. **Real-time WebSocket Connection**: Establishes a persistent connection with Gemini Live API
+                2. **Direct Audio Streaming**: Your microphone audio is sent as PCM data to the API
+                3. **Instant Voice Response**: Gemini responds with natural speech played through your speakers
+                4. **No File Processing**: Audio is streamed in real-time chunks, not saved as files
+                
+                ### To Use Salesman Mode:
+                1. Ensure your microphone and speakers are working
+                2. Click 'Start Live Conversation' to begin the AI sales session
+                3. Speak naturally - the AI will respond in real-time
+                4. The AI is programmed to highlight features and benefits of the selected machine
+                """)
+                
+                # API Key Check
+                api_key = st.secrets.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+                if not api_key:
+                    st.error("""
+                    **Google API Key Required**: This feature requires a Google API key with access to Gemini Live API.
+                    Please add your API key to Streamlit secrets or environment variables.
+                    """)
+                else:
+                    st.success("✅ Google API key detected - Ready for Gemini Live")
+                
+                # Start/Stop buttons
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.button("🎙️ Start Live Conversation"):
+                        if not api_key:
+                            st.error("Cannot start - API key missing")
+                        else:
+                            if not st.session_state.gemini_live_audio:
+                                # Initialize the audio processing class
+                                st.session_state.gemini_live_audio = GeminiLiveAudio(
+                                    selected_machine,
+                                    manual_path
+                                )
                             
-                            # Move to the middle frame of the video
-                            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, total_frames // 2)
-                            
-                            # Read the frame
-                            ret, frame = cap.read()
-                            cap.release()
-                            
-                            if ret:
-                                # Convert from OpenCV format to PIL Image
-                                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                                pil_frame = Image.fromarray(frame_rgb)
-                                
-                                st.image(pil_frame, caption="Extracted Frame", width=400)
-                                
-                                # Add a button to analyze the frame
-                                if st.button("Analyze Extracted Frame"):
-                                    with st.spinner("Analyzing frame..."):
-                                        # Process the image with the model
-                                        result = analyze_component_image(pil_frame, selected_machine, manual_path, st.session_state.model)
-                                        
-                                        # Display the result
-                                        st.markdown("### Component Analysis Result")
-                                        st.markdown(result)
+                            # Start the audio processing
+                            if st.session_state.gemini_live_audio.start():
+                                st.success("🎯 Live conversation started! Start speaking with the AI salesman.")
+                                st.info("The AI has been briefed on the " + selected_machine + " and is ready to discuss its features.")
                             else:
-                                st.error("Failed to extract frame from the video.")
-                        
-                        # Clean up the temporary file
-                        os.unlink(temp_path)
+                                st.error("Failed to start live conversation. Please check your microphone permissions.")
+                
+                with col2:
+                    if st.button("⏹️ Stop Conversation"):
+                        if st.session_state.gemini_live_audio:
+                            if st.session_state.gemini_live_audio.stop():
+                                st.info("Live conversation stopped.")
+                            else:
+                                st.error("Failed to stop the conversation.")
+                
+                # Status indicator
+                if st.session_state.gemini_live_audio and st.session_state.gemini_live_audio.running:
+                    st.success("🔴 LIVE: AI Salesman is listening and ready to respond")
+                else:
+                    st.info("⚫ OFFLINE: Start the conversation to begin")
+                
+                # Technical Details
+                with st.expander("🔧 Technical Implementation Details"):
+                    st.markdown("""
+                    **What's Different About This Implementation:**
                     
-                    st.markdown('</div>', unsafe_allow_html=True)
+                    - **Real Gemini Live API**: Uses `google.genai.Client` with Live API endpoints
+                    - **WebSocket Connection**: Persistent connection via `client.aio.live.connect()`
+                    - **PCM Audio Streaming**: Raw audio data sent as `{"data": audio_bytes, "mime_type": "audio/pcm"}`
+                    - **Async Processing**: Multiple async tasks for audio capture, sending, receiving, and playback
+                    - **No PyAudio File I/O**: Direct stream-to-stream audio processing
+                    
+                    **Audio Configuration:**
+                    - Input: 16kHz mono PCM from microphone
+                    - Output: 24kHz mono PCM to speakers  
+                    - Chunk size: 1024 samples
+                    - Model: `gemini-2.0-flash-live-001`
+                    - Voice: "Puck" (configurable)
+                    """)
+                
+                # Conversation History
+                st.markdown("### 💬 Conversation History")
+                
+                # Display conversation history
+                if st.session_state.gemini_live_audio and st.session_state.gemini_live_audio.conversation_history:
+                    conversation_container = st.container()
+                    with conversation_container:
+                        for exchange in st.session_state.gemini_live_audio.conversation_history[-10:]:  # Show last 10 exchanges
+                            if exchange["role"] == "user":
+                                st.markdown(f'<div class="chat-message user-message"><strong>Customer:</strong> {exchange["content"]}</div>', unsafe_allow_html=True)
+                            else:
+                                st.markdown(f'<div class="chat-message assistant-message"><strong>AI Salesman:</strong> {exchange["content"]}</div>', unsafe_allow_html=True)
+                else:
+                    st.info("Conversation history will appear here once you start talking with the AI salesman.")
+                
+                # Alternative text input
+                st.markdown("### ⌨️ Text Input Alternative")
+                st.info("While the AI is designed for voice conversation, you can also type questions:")
+                
+                text_question = st.text_input("Type a question about the " + selected_machine)
+                if st.button("Send Text Question") and text_question:
+                    if st.session_state.gemini_live_audio and st.session_state.gemini_live_audio.running:
+                        response = st.session_state.gemini_live_audio.send_text_input(text_question)
+                        st.success(f"✅ {response}")
+                        # Force a rerun to show updated conversation
+                        st.rerun()
+                    else:
+                        st.warning("Please start the live conversation first to send text messages.")
 
 # Run the app
 if __name__ == "__main__":
