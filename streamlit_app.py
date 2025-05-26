@@ -5,7 +5,7 @@ import base64
 from PIL import Image
 import io
 import glob
-import google.generativeai as genai # For GenerativeModel
+import google.generativeai as genai 
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from streamlit_extras.stylable_container import stylable_container
 import time
@@ -715,9 +715,9 @@ def main():
             tabs = st.tabs([
                 "AI Chat Assistant", 
                 "Component Image Recognition", 
-                "Fault-to-Spare Recommendation", 
-                "Repair Playbook Generator",
-                "Live Video Stream",
+                # "Fault-to-Spare Recommendation", 
+                # "Repair Playbook Generator",
+                # "Live Video Stream",
                 "Salesman Mode"  # New tab for Gemini's audio streaming
             ])
             
@@ -908,131 +908,131 @@ def main():
                             st.markdown(analysis_result)
             
             # 4. Fault-to-Spare Recommendation Tab
-            with tabs[2]:
-                st.markdown('<div class="feature-header">Fault-to-Spare Recommendation</div>', unsafe_allow_html=True)
-                st.markdown("""
-                Upload a fault list PDF, and I'll analyze it to recommend the most likely 
-                spare parts needed for repair.
-                """)
+            # with tabs[2]:
+            #     st.markdown('<div class="feature-header">Fault-to-Spare Recommendation</div>', unsafe_allow_html=True)
+            #     st.markdown("""
+            #     Upload a fault list PDF, and I'll analyze it to recommend the most likely 
+            #     spare parts needed for repair.
+            #     """)
                 
-                uploaded_fault_list = st.file_uploader("Upload fault list PDF", type=["pdf"])
+            #     uploaded_fault_list = st.file_uploader("Upload fault list PDF", type=["pdf"])
                 
-                if uploaded_fault_list is not None:
-                    st.success(f"Uploaded: {uploaded_fault_list.name}")
+            #     if uploaded_fault_list is not None:
+            #         st.success(f"Uploaded: {uploaded_fault_list.name}")
                     
-                    if st.button("Analyze Faults"):
-                        with st.spinner("Analyzing fault list and recommending spare parts..."):
-                            analysis_result = process_fault_list(
-                                uploaded_fault_list,
-                                selected_machine,
-                                manual_path,
-                                st.session_state.model
-                            )
+            #         if st.button("Analyze Faults"):
+            #             with st.spinner("Analyzing fault list and recommending spare parts..."):
+            #                 analysis_result = process_fault_list(
+            #                     uploaded_fault_list,
+            #                     selected_machine,
+            #                     manual_path,
+            #                     st.session_state.model
+            #                 )
                             
-                            st.markdown("### Fault Analysis and Spare Parts Recommendation")
-                            st.markdown(analysis_result)
+            #                 st.markdown("### Fault Analysis and Spare Parts Recommendation")
+            #                 st.markdown(analysis_result)
             
-            # 5. Repair Playbook Generator Tab
-            with tabs[3]:
-                st.markdown('<div class="feature-header">Repair Playbook Generator</div>', unsafe_allow_html=True)
-                st.markdown("""
-                Describe the issue or select a component, and I'll generate a 
-                step-by-step repair guide with safety precautions.
-                """)
+            # # 5. Repair Playbook Generator Tab
+            # with tabs[3]:
+            #     st.markdown('<div class="feature-header">Repair Playbook Generator</div>', unsafe_allow_html=True)
+            #     st.markdown("""
+            #     Describe the issue or select a component, and I'll generate a 
+            #     step-by-step repair guide with safety precautions.
+            #     """)
                 
-                issue_description = st.text_area(
-                    "Describe the issue or component to repair",
-                    placeholder="E.g., 'E21 error code on display', 'Replace the main PCB', 'Wire feed motor not working'"
-                )
+            #     issue_description = st.text_area(
+            #         "Describe the issue or component to repair",
+            #         placeholder="E.g., 'E21 error code on display', 'Replace the main PCB', 'Wire feed motor not working'"
+            #     )
                 
-                if st.button("Generate Repair Playbook") and issue_description:
-                    with st.spinner("Generating repair playbook..."):
-                        playbook = generate_repair_playbook(
-                            issue_description,
-                            selected_machine,
-                            manual_path,
-                            st.session_state.model
-                        )
+            #     if st.button("Generate Repair Playbook") and issue_description:
+            #         with st.spinner("Generating repair playbook..."):
+            #             playbook = generate_repair_playbook(
+            #                 issue_description,
+            #                 selected_machine,
+            #                 manual_path,
+            #                 st.session_state.model
+            #             )
                         
-                        st.markdown("### Repair Playbook")
-                        st.markdown(playbook)
+            #             st.markdown("### Repair Playbook")
+            #             st.markdown(playbook)
             
             # 6. Live Video Streaming Tab
-            with tabs[4]:
-                st.markdown('<div class="feature-header">Live Video Stream</div>', unsafe_allow_html=True)
+            # with tabs[4]:
+            #     st.markdown('<div class="feature-header">Live Video Stream</div>', unsafe_allow_html=True)
                 
-                st.markdown("""
-                Use your camera to stream live video for remote diagnostics or share your screen 
-                to show the machine's display. You can also take screenshots for AI analysis.
-                """)
+            #     st.markdown("""
+            #     Use your camera to stream live video for remote diagnostics or share your screen 
+            #     to show the machine's display. You can also take screenshots for AI analysis.
+            #     """)
                 
-                # Create two columns for the video options
-                stream_col1, stream_col2 = st.columns(2)
+            #     # Create two columns for the video options
+            #     stream_col1, stream_col2 = st.columns(2)
                 
-                # Option 1: Live Webcam Stream
-                with stream_col1:
-                    st.markdown("#### Camera Stream")
+            #     # Option 1: Live Webcam Stream
+            #     with stream_col1:
+            #         st.markdown("#### Camera Stream")
                     
-                    # Configure WebRTC
-                    rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
-                    video_processor = VideoProcessor()
+            #         # Configure WebRTC
+            #         rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+            #         video_processor = VideoProcessor()
                     
-                    webrtc_ctx = webrtc_streamer(
-                        key="video-stream",
-                        video_processor_factory=lambda: video_processor,
-                        rtc_configuration=rtc_config,
-                        media_stream_constraints={"video": True, "audio": False},
-                    )
+            #         webrtc_ctx = webrtc_streamer(
+            #             key="video-stream",
+            #             video_processor_factory=lambda: video_processor,
+            #             rtc_configuration=rtc_config,
+            #             media_stream_constraints={"video": True, "audio": False},
+            #         )
                     
-                    if webrtc_ctx.video_processor:
-                        if st.button("Take Screenshot"):
-                            webrtc_ctx.video_processor.toggle_screenshot()
-                            st.info("Screenshot captured! Check below to analyze it.")
+            #         if webrtc_ctx.video_processor:
+            #             if st.button("Take Screenshot"):
+            #                 webrtc_ctx.video_processor.toggle_screenshot()
+            #                 st.info("Screenshot captured! Check below to analyze it.")
                             
-                        # Display and analyze screenshot if available
-                        screenshot = webrtc_ctx.video_processor.get_screenshot()
-                        if screenshot is not None:
-                            st.image(screenshot, caption="Captured Screenshot", width=400)
+            #             # Display and analyze screenshot if available
+            #             screenshot = webrtc_ctx.video_processor.get_screenshot()
+            #             if screenshot is not None:
+            #                 st.image(screenshot, caption="Captured Screenshot", width=400)
                             
-                            if st.button("Analyze Screenshot"):
-                                # Convert OpenCV image to PIL for analysis
-                                pil_image = Image.fromarray(cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB))
+            #                 if st.button("Analyze Screenshot"):
+            #                     # Convert OpenCV image to PIL for analysis
+            #                     pil_image = Image.fromarray(cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB))
                                 
-                                with st.spinner("Analyzing screenshot..."):
-                                    analysis_result = analyze_component_image(
-                                        pil_image,
-                                        selected_machine,
-                                        manual_path,
-                                        st.session_state.model
-                                    )
+            #                     with st.spinner("Analyzing screenshot..."):
+            #                         analysis_result = analyze_component_image(
+            #                             pil_image,
+            #                             selected_machine,
+            #                             manual_path,
+            #                             st.session_state.model
+            #                         )
                                     
-                                    st.markdown("### Screenshot Analysis")
-                                    st.markdown(analysis_result)
+            #                         st.markdown("### Screenshot Analysis")
+            #                         st.markdown(analysis_result)
                 
-                # Option 2: Screen Sharing
-                with stream_col2:
-                    st.markdown("#### Screen Sharing")
-                    st.markdown("""
-                    For desktop/screen sharing, click the button below to start sharing your screen.
-                    This allows you to show error messages or settings on the machine's display.
-                    """)
+            #     # Option 2: Screen Sharing
+            #     with stream_col2:
+            #         st.markdown("#### Screen Sharing")
+            #         st.markdown("""
+            #         For desktop/screen sharing, click the button below to start sharing your screen.
+            #         This allows you to show error messages or settings on the machine's display.
+            #         """)
                     
-                    # NOTE: Due to Streamlit's limitations, we're implementing this with a placeholder button
-                    # that would normally launch a screen sharing session using a JavaScript library
-                    if st.button("Share Your Screen"):
-                        st.markdown("""
-                        Screen sharing initiated.
+            #         # NOTE: Due to Streamlit's limitations, we're implementing this with a placeholder button
+            #         # that would normally launch a screen sharing session using a JavaScript library
+            #         if st.button("Share Your Screen"):
+            #             st.markdown("""
+            #             Screen sharing initiated.
                         
-                        Select which window or screen to share when prompted by your browser.
-                        """)
+            #             Select which window or screen to share when prompted by your browser.
+            #             """)
                         
-                        # Here you would normally include JavaScript to start screen sharing
-                        # In a production application, you would use a WebRTC library for screen sharing
-                        # This is just a placeholder for the actual implementation
-                        st.info("Note: Screen sharing simulation only. In a production app, this would launch a WebRTC screen sharing session.")
+            #             # Here you would normally include JavaScript to start screen sharing
+            #             # In a production application, you would use a WebRTC library for screen sharing
+            #             # This is just a placeholder for the actual implementation
+            #             st.info("Note: Screen sharing simulation only. In a production app, this would launch a WebRTC screen sharing session.")
             
             # 7. Salesman Mode Tab (New)
-            with tabs[5]:
+            with tabs[2]:
                 st.markdown('<div class="feature-header">Salesman Assistant Mode</div>', unsafe_allow_html=True)
                 
                 st.markdown("""
@@ -1044,13 +1044,13 @@ def main():
                 """, unsafe_allow_html=True)
                 
                 # Instructions
+                # st.markdown("""
+                # ### How Gemini Live Audio Works:
+                # 1. **Real-time WebSocket Connection**: Establishes a persistent connection with Gemini Live API
+                # 2. **Direct Audio Streaming**: Your microphone audio is sent as PCM data to the API
+                # 3. **Instant Voice Response**: Gemini responds with natural speech played through your speakers
+                # 4. **No File Processing**: Audio is streamed in real-time chunks, not saved as files
                 st.markdown("""
-                ### How Gemini Live Audio Works:
-                1. **Real-time WebSocket Connection**: Establishes a persistent connection with Gemini Live API
-                2. **Direct Audio Streaming**: Your microphone audio is sent as PCM data to the API
-                3. **Instant Voice Response**: Gemini responds with natural speech played through your speakers
-                4. **No File Processing**: Audio is streamed in real-time chunks, not saved as files
-                
                 ### To Use Salesman Mode:
                 1. Ensure your microphone and speakers are working
                 2. Click 'Start Live Conversation' to begin the AI sales session
@@ -1065,8 +1065,8 @@ def main():
                     **Google API Key Required**: This feature requires a Google API key with access to Gemini Live API.
                     Please add your API key to Streamlit secrets or environment variables.
                     """)
-                else:
-                    st.success("✅ Google API key detected - Ready for Gemini Live")
+                # else:
+                #     st.success("✅ Google API key detected - Ready for Gemini Live")
                 
                 # Start/Stop buttons
                 col1, col2 = st.columns(2)
@@ -1104,24 +1104,24 @@ def main():
                 else:
                     st.info("⚫ OFFLINE: Start the conversation to begin")
                 
-                # Technical Details
-                with st.expander("🔧 Technical Implementation Details"):
-                    st.markdown("""
-                    **What's Different About This Implementation:**
+                # # Technical Details
+                # with st.expander("🔧 Technical Implementation Details"):
+                #     st.markdown("""
+                #     **What's Different About This Implementation:**
                     
-                    - **Real Gemini Live API**: Uses `google.genai.Client` with Live API endpoints
-                    - **WebSocket Connection**: Persistent connection via `client.aio.live.connect()`
-                    - **PCM Audio Streaming**: Raw audio data sent as `{"data": audio_bytes, "mime_type": "audio/pcm"}`
-                    - **Async Processing**: Multiple async tasks for audio capture, sending, receiving, and playback
-                    - **No PyAudio File I/O**: Direct stream-to-stream audio processing
+                #     - **Real Gemini Live API**: Uses `google.genai.Client` with Live API endpoints
+                #     - **WebSocket Connection**: Persistent connection via `client.aio.live.connect()`
+                #     - **PCM Audio Streaming**: Raw audio data sent as `{"data": audio_bytes, "mime_type": "audio/pcm"}`
+                #     - **Async Processing**: Multiple async tasks for audio capture, sending, receiving, and playback
+                #     - **No PyAudio File I/O**: Direct stream-to-stream audio processing
                     
-                    **Audio Configuration:**
-                    - Input: 16kHz mono PCM from microphone
-                    - Output: 24kHz mono PCM to speakers  
-                    - Chunk size: 1024 samples
-                    - Model: `gemini-2.0-flash-live-001`
-                    - Voice: "Puck" (configurable)
-                    """)
+                #     **Audio Configuration:**
+                #     - Input: 16kHz mono PCM from microphone
+                #     - Output: 24kHz mono PCM to speakers  
+                #     - Chunk size: 1024 samples
+                #     - Model: `gemini-2.0-flash-live-001`
+                #     - Voice: "Puck" (configurable)
+                #     """)
                 
                 # Conversation History
                 st.markdown("### 💬 Conversation History")
