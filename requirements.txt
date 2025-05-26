@@ -1,6 +1,7 @@
 streamlit>=1.45.0
 openai
 google-genai
+google-generativeai
 pyaudio
 opencv-python
 pillow
